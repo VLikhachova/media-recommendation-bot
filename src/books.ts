@@ -101,6 +101,7 @@ async function lookupBook(item: Recommendation): Promise<Recommendation> {
   if (!details) return item;
   return {
     ...item,
+    title: details.title || item.title,
     author: item.author || details.authors.join(", ") || null,
     year: item.year || (details.year && /^\d{4}$/.test(details.year) ? Number(details.year) : null),
     series: details.series || item.series
