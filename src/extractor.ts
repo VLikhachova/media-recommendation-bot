@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import type { Category, CategoryDefinition, Recommendation } from "./types.js";
 
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const bilingualTitleInstruction = "Если одно и то же произведение явно указано на двух языках (например, оригинальное название и его перевод в скобках, через тире, слэш или соседними строками), верни ОДИН элемент items, объединив обе формы в одном поле title: «Русское название (Original Title)». Не создавай отдельную рекомендацию для перевода и оригинала. Объединяй их только когда источник явно показывает, что это два названия одного произведения; два самостоятельных пункта списка оставляй отдельными. Не придумывай отсутствующую форму названия.";
 const defaultCategories: CategoryDefinition[] = [
   { id: "movie", label: "Фильмы", isCore: true, isActive: true, sortOrder: 10 },
   { id: "series", label: "Сериалы", isCore: true, isActive: true, sortOrder: 20 },
@@ -71,6 +72,7 @@ export async function extractRecommendations(
 Если в тексте нет явных рекомендаций, верни {"items":[]}.
 Для каждого элемента category выбери ID из списка: ${categoryOptions}. Используй только эти ID (${categoryIds}).
 ${buildCategoryInstructions(categories)}
+${bilingualTitleInstruction}
 year — число или null; для книг указывай год из публикации, только если он явно есть в источнике. author — автор книги, только если явно указан, иначе null. series — название книжной серии, если оно явно указано, иначе null. note — короткое пояснение или null.
 Сохраняй оригинальное написание названий.${buildLinkInstructions(availableLinks)}`
       },
@@ -104,6 +106,7 @@ export async function extractRecommendationsFromImages(
 Каждое извлечённое название должно быть явно видно на изображении или названо как рекомендация в тексте, написанном пользователем. Заголовок страницы, имя аккаунта, текст кнопок и Open Graph/SEO-метаданные сами по себе не являются рекомендациями; не добавляй названия из них, если они не подтверждены содержимым изображений.
 Для каждого элемента category выбери ID из списка: ${categoryOptions}. Используй только эти ID (${categoryIds}).
 ${buildCategoryInstructions(categories)}
+${bilingualTitleInstruction}
 year — число или null. note — короткое пояснение или null. Сохраняй оригинальное написание названий.
 Для фильмов и сериалов различай формат по реальному типу произведения и контексту, а не по виду постера или жанру. Если подпись или изображение явно описывает подборку сериалов/TV shows, относись ко всем названиям этой подборки как к сериалам, если конкретное название явно не обозначено иначе. Названия известных телесериалов помечай как series, даже если рекламное изображение выглядит как кинопостер. Не считай слова horror, thriller, movie или автоматические SEO-метаданные надёжным доказательством формата. Если формат невозможно определить по названию и контексту, выбери other, а не угадывай movie.${buildLinkInstructions(availableLinks)}`
       },
