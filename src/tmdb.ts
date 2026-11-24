@@ -62,7 +62,7 @@ async function searchBest(
   token: string
 ): Promise<TmdbSearchResult | null> {
   const url = new URL(`https://api.themoviedb.org/3/search/${kind}`);
-  url.searchParams.set("query", item.title);
+  url.searchParams.set("query", titleVariants(item.title)[0] || item.title);
   url.searchParams.set("language", "ru-RU");
   if (item.year) url.searchParams.set(kind === "movie" ? "year" : "first_air_date_year", String(item.year));
 
