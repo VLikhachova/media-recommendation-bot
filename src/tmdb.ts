@@ -60,7 +60,7 @@ async function searchExact(
 }
 
 export async function getTmdbDetails(item: Recommendation): Promise<TmdbMediaDetails | null> {
-  const token = process.env.TMDB_API_TOKEN;
+  const token = process.env.TMDB_API_TOKEN || process.env.TMDB_APPI_TOKEN;
   if (!token) throw new Error("TMDB_TOKEN_MISSING");
   if (item.category !== "movie" && item.category !== "series" && item.category !== "watched") return null;
 

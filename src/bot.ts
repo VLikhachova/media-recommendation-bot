@@ -10,7 +10,7 @@ import {
 } from "./database.js";
 import type { Category, Recommendation } from "./types.js";
 import { getTmdbDetails } from "./tmdb.js";
-import { enrichBookRecommendations } from "./books.js";
+import { enrichBookRecommendations, getGoogleBookDetails, hasGoogleBooksApiKey } from "./books.js";
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 if (!token) throw new Error("Не задан TELEGRAM_BOT_TOKEN в .env");
@@ -45,6 +45,10 @@ const categoryAliases: Record<string, Category> = {
 
 function categoryLabel(id: Category): string {
   return getCategory(id)?.label || id;
+}
+
+function hasTmdbApiToken(): boolean {
+  return Boolean(process.env.TMDB_API_TOKEN || process.env.TMDB_APPI_TOKEN);
 }
 
 function recommendationCategories() {
@@ -141,30 +145,38 @@ function escapeHtml(value: string): string {
 
 async function sendRecommendationCard(ctx: any, item: any) {
   let details: Awaited<ReturnType<typeof getTmdbDetails>> = null;
+  let bookDetails: Awaited<ReturnType<typeof getGoogleBookDetails>> = null;
   try {
-    if (["movie", "series", "watched"].includes(item.category) && process.env.TMDB_API_TOKEN) {
+    if (["movie", "series", "watched"].includes(item.category) && hasTmdbApiToken()) {
       details = await getTmdbDetails(item as Recommendation);
     }
   } catch {
     // Keep the saved recommendation available if TMDB cannot be reached.
   }
-  const title = details?.title || item.title;
-  const year = details?.year || item.year;
-  const overview = details?.overview || item.note || (
-    ["movie", "series", "watched"].includes(item.category) && !process.env.TMDB_API_TOKEN
+  if (item.category === "book") bookDetails = await getGoogleBookDetails(item as Recommendation);
+  const title = bookDetails?.title || details?.title || item.title;
+  const year = details?.year || bookDetails?.year || item.year;
+  const author = item.category === "book" ? (bookDetails?.authors.join(", ") || item.author) : null;
+  const seriesName = item.category === "book" ? (bookDetails?.series || item.book_series) : null;
+  const bookInfo = [author, seriesName ? `серия: ${seriesName}` : null].filter(Boolean).join(" · ");
+  const overview = details?.overview || bookDetails?.description || item.note || (
+    ["movie", "series", "watched"].includes(item.category) && !hasTmdbApiToken()
       ? "Добавь TMDB_API_TOKEN, чтобы получать описания и постеры."
-      : "Описание пока недоступно."
+      : item.category === "book"
+        ? "Описание книги пока недоступно в Google Books."
+        : "Описание пока недоступно."
   );
-  const caption = `<b>${escapeHtml(title)}${year ? ` (${escapeHtml(String(year))})` : ""}</b>\n${escapeHtml(categoryLabel(item.category))}\n\n${escapeHtml(overview.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").slice(0, 800))}`;
+  const caption = `<b>${escapeHtml(title)}${year ? ` (${escapeHtml(String(year))})` : ""}</b>\n${escapeHtml(categoryLabel(item.category))}${bookInfo ? `\n${escapeHtml(bookInfo)}` : ""}\n\n${escapeHtml(overview.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").slice(0, 800))}`;
   const linkButtons = recordLinks(item).map((link, index) => {
     let label = `Источник ${index + 1}`;
     try { label = new URL(link).hostname.slice(0, 60); } catch { /* Keep generic label. */ }
     return [Markup.button.url(label, link)];
   });
   const keyboard = linkButtons.length ? Markup.inlineKeyboard(linkButtons) : undefined;
-  if (details?.posterUrl) {
+  const posterUrl = details?.posterUrl || bookDetails?.coverUrl;
+  if (posterUrl) {
     try {
-      await ctx.replyWithPhoto(details.posterUrl, { caption, parse_mode: "HTML", ...(keyboard || {}) });
+      await ctx.replyWithPhoto(posterUrl, { caption, parse_mode: "HTML", ...(keyboard || {}) });
       return;
     } catch {
       // Fall back to a text card if Telegram cannot fetch the TMDB poster.
@@ -257,7 +269,7 @@ async function sendCategoryList(ctx: any, category: Category) {
   const rows = getByCategory(category, 50);
   const label = categoryLabel(category);
   if (!rows.length) return ctx.reply(`${label} (0)\n\nПока здесь ничего нет.`);
-  const hasCards = ["movie", "series", "watched"].includes(category);
+  const hasCards = ["movie", "series", "watched"].includes(category) || (category === "book" && hasGoogleBooksApiKey());
   if (!hasCards) {
     return ctx.reply(`${label} (${rows.length})\n\n${formatItems(rows)}`);
   }
