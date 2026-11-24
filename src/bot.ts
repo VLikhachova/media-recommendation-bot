@@ -399,6 +399,17 @@ function parseNumberList(value: string): number[] | null {
 }
 
 function parseNaturalListActions(text: string): NaturalListAction[] {
+  const categorizedTitleDelete = text.match(/^\s*(.+?)\s*,\s*(?:удали|удалить)\s*:\s*(.+?)\s*[.!?]*$/i);
+  if (categorizedTitleDelete) {
+    const category = resolveCategory(categorizedTitleDelete[1]);
+    const titles = categorizedTitleDelete[2]
+      .split(/\s*(?:,|;|\bи\b)\s*/iu)
+      .map(title => title.trim().replace(/^[«"“]+|[»"”]+$/g, "").trim())
+      .filter(Boolean);
+    if (category && titles.length) {
+      return [{ kind: "deleteTitles", entries: titles.map(title => ({ title, category })) }];
+    }
+  }
   const categorizedDelete = text.match(/^\s*(.+?)\s*,\s*(?:удали|удалить)(?:\s+(?:пункты|номера))?\s+(.+?)\s*[.!?]*$/i);
   if (categorizedDelete) {
     const category = resolveCategory(categorizedDelete[1]);
