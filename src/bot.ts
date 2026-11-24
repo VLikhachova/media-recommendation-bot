@@ -9,7 +9,7 @@ import {
   importLocalBackup, initializeCurrentUserLibrary, isAuthorizedTelegramUser, listTelegramAccess, revokeTelegramAccess, runForTelegramUser, saveRecommendations, searchRecommendations, setCategoryActive, updateCategory, updateRecommendationTitle, updateTelegramUsername
 } from "./database.js";
 import type { Category, Recommendation } from "./types.js";
-import { getTmdbDetails } from "./tmdb.js";
+import { enrichMediaRecommendations, getTmdbDetails } from "./tmdb.js";
 import { enrichBookRecommendations, getGoogleBookDetails, hasGoogleBooksApiKey } from "./books.js";
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -192,7 +192,8 @@ async function sendRecommendationCardMessage(ctx: any, item: any) {
     // Keep the saved recommendation available if TMDB cannot be reached.
   }
   if (item.category === "book") bookDetails = await getGoogleBookDetails(item as Recommendation);
-  const title = bookDetails?.title || details?.title || item.title;
+  const mediaTitle = details ? `${details.title}${details.originalTitle ? ` (${details.originalTitle})` : ""}` : item.title;
+  const title = bookDetails?.title || mediaTitle;
   const year = details?.year || bookDetails?.year || item.year;
   const author = item.category === "book" ? (bookDetails?.authors.join(", ") || item.author) : null;
   const seriesName = item.category === "book" ? (bookDetails?.series || item.book_series) : null;
@@ -628,7 +629,7 @@ async function markTitleWatched(ctx: any, title: string) {
 async function processText(ctx: any, text: string, sourceUrl: string | null, extraLinks: string[] = [], announce = true) {
   if (announce) await ctx.reply("Разбираю рекомендации…");
   const sourceLinks = collectSourceLinks(text, sourceUrl, extraLinks);
-  const extracted = await enrichBookRecommendations(await extractRecommendations(text, sourceLinks, recommendationCategories()));
+  const extracted = await enrichMediaRecommendations(await enrichBookRecommendations(await extractRecommendations(text, sourceLinks, recommendationCategories())));
   const items = attachUnambiguousSourceLink(extracted, sourceLinks);
   if (!items.length) {
     await ctx.reply(
@@ -950,7 +951,7 @@ bot.action(/^natrename:(.+)$/, async (ctx) => {
 });
 
 async function saveAndReply(ctx: any, items: Recommendation[], sourceUrl: string, sourceText: string) {
-  items = await enrichBookRecommendations(items);
+  items = await enrichMediaRecommendations(await enrichBookRecommendations(items));
   items = attachUnambiguousSourceLink(items, collectSourceLinks(sourceText, sourceUrl));
   const result = saveRecommendations(items, sourceUrl, sourceText);
   const lines = items.map(x => `• ${formatRecommendationTitle(x)} - ${categoryLabel(x.category)}`);
@@ -972,7 +973,7 @@ bot.on("photo", async (ctx) => {
     const mime = file.file_path.endsWith(".png") ? "image/png" : "image/jpeg";
     const dataUrl = `data:${mime};base64,${bytes.toString("base64")}`;
     await ctx.reply("Читаю скриншот…");
-  const items = await enrichBookRecommendations(await extractRecommendationsFromImages([{ mimeType: mime, dataUrl }], "", [], recommendationCategories()));
+  const items = await enrichMediaRecommendations(await enrichBookRecommendations(await extractRecommendationsFromImages([{ mimeType: mime, dataUrl }], "", [], recommendationCategories())));
     if (!items.length) return ctx.reply("На скриншоте не удалось найти названия рекомендаций.");
     const result = saveRecommendations(items, null, "[Скриншот]");
     await ctx.reply(`Сохранено: ${result.saved}${result.duplicates ? `\nДубликатов: ${result.duplicates}` : ""}\n\n${items.map(x => `• ${formatRecommendationTitle(x)} - ${categoryLabel(x.category)}`).join("\n")}`);
