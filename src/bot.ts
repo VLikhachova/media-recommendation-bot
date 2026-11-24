@@ -6,7 +6,7 @@ import { extractUrl, extractUrls, getLinkPreview } from "./link-preview.js";
 import {
   acceptTelegramInvitation, createCategory, createTelegramInvitation, deleteRecommendation, getByCategory, getByListNumber, getCategories,
   getById, getCategory, getCategoryByLabel, getRandom, markWatched, moveToWatched, renameCategory,
-  importLocalBackup, initializeCurrentUserLibrary, isAuthorizedTelegramUser, listTelegramAccess, revokeTelegramAccess, runForTelegramUser, saveRecommendations, searchMedia, searchRecommendations, setCategoryActive, updateCategory, updateRecommendationTitle, updateTelegramUsername
+  importLocalBackup, initializeCurrentUserLibrary, isAuthorizedTelegramUser, listTelegramAccess, revokeTelegramAccess, runForTelegramUser, saveRecommendations, searchRecommendations, setCategoryActive, updateCategory, updateRecommendationTitle, updateTelegramUsername
 } from "./database.js";
 import type { Category, Recommendation } from "./types.js";
 import { getTmdbDetails } from "./tmdb.js";
@@ -585,7 +585,7 @@ async function handleNaturalListActions(ctx: any, text: string): Promise<boolean
 }
 
 async function markTitleWatched(ctx: any, title: string) {
-  const matches = searchMedia(title);
+  const matches = findTitleMatches(title).filter(item => ["movie", "series"].includes(item.category));
   if (!matches.length) {
     await ctx.reply(`Не нашла «${title}» в списках фильмов и сериалов. Проверь название или добавь рекомендацию.`);
     return;
