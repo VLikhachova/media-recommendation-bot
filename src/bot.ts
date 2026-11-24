@@ -92,6 +92,11 @@ function collectSourceLinks(text: string, sourceUrl: string | null, extraLinks: 
   ))].slice(0, 20);
 }
 
+function attachUnambiguousSourceLink(items: Recommendation[], sourceLinks: string[]): Recommendation[] {
+  if (items.length !== 1 || sourceLinks.length !== 1 || items[0].links?.length) return items;
+  return [{ ...items[0], links: [sourceLinks[0]] }];
+}
+
 function isSourceLink(link: string): boolean {
   try {
     const host = new URL(link).hostname.toLowerCase().replace(/^www\./, "");
@@ -506,7 +511,8 @@ async function markTitleWatched(ctx: any, title: string) {
 async function processText(ctx: any, text: string, sourceUrl: string | null, extraLinks: string[] = [], announce = true) {
   if (announce) await ctx.reply("Разбираю рекомендации…");
   const sourceLinks = collectSourceLinks(text, sourceUrl, extraLinks);
-  const items = await enrichBookRecommendations(await extractRecommendations(text, sourceLinks, recommendationCategories()));
+  const extracted = await enrichBookRecommendations(await extractRecommendations(text, sourceLinks, recommendationCategories()));
+  const items = attachUnambiguousSourceLink(extracted, sourceLinks);
   if (!items.length) {
     await ctx.reply(
       "Не нашёл явных названий. Пришли текст подписи к посту или просто напиши названия вручную.\n\n" +
@@ -729,6 +735,7 @@ bot.action(/^natrename:(.+)$/, async (ctx) => {
 
 async function saveAndReply(ctx: any, items: Recommendation[], sourceUrl: string, sourceText: string) {
   items = await enrichBookRecommendations(items);
+  items = attachUnambiguousSourceLink(items, collectSourceLinks(sourceText, sourceUrl));
   const result = saveRecommendations(items, sourceUrl, sourceText);
   const lines = items.map(x => `• ${formatRecommendationTitle(x)} - ${categoryLabel(x.category)}`);
   await ctx.reply(

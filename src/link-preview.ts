@@ -494,7 +494,8 @@ async function loadImage(url: string): Promise<{ mimeType: string; dataUrl: stri
 }
 
 export function extractUrl(text: string): string | null {
-  return extractUrls(text)[0] || null;
+  const urls = extractUrls(text);
+  return urls.find(url => isThreadsUrl(url) || isInstagramUrl(url) || isPinterestUrl(url)) || urls[0] || null;
 }
 
 export function extractUrls(text: string): string[] {
