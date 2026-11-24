@@ -1,15 +1,19 @@
 import Database from "better-sqlite3";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type { Category, CategoryDefinition, Recommendation } from "./types.js";
 
+const ownerTelegramId = process.env.TELEGRAM_USER_ID;
+if (!ownerTelegramId || !/^[0-9]+$/.test(ownerTelegramId)) throw new Error("TELEGRAM_USER_ID must be configured before the database opens.");
 const dbPath = resolve("data/recommendations.sqlite");
 mkdirSync(dirname(dbPath), { recursive: true });
-const db = new Database(dbPath);
-db.pragma("journal_mode = WAL");
+const ownerDb = new Database(dbPath);
+ownerDb.pragma("journal_mode = WAL");
+let db: any = ownerDb;
 
-db.exec(`
+ownerDb.exec(`
   CREATE TABLE IF NOT EXISTS recommendations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT NOT NULL,
@@ -28,7 +32,7 @@ db.exec(`
     ON recommendations(category);
 `);
 
-db.exec(`
+ownerDb.exec(`
   CREATE TABLE IF NOT EXISTS recommendation_categories (
     id TEXT PRIMARY KEY,
     label TEXT NOT NULL COLLATE NOCASE UNIQUE,
@@ -52,22 +56,148 @@ const builtinCategories = [
   { id: "music", label: "Музыка", core: false, order: 60 },
   { id: "place", label: "Места", core: false, order: 70 }
 ];
-const addBuiltinCategory = db.prepare(`
+const addBuiltinCategory = ownerDb.prepare(`
   INSERT OR IGNORE INTO recommendation_categories (id, label, is_core, is_active, sort_order)
   VALUES (?, ?, ?, ?, ?)
 `);
-const categoryHasItems = db.prepare("SELECT EXISTS(SELECT 1 FROM recommendations WHERE category = ?) AS has_items");
+const categoryHasItems = ownerDb.prepare("SELECT EXISTS(SELECT 1 FROM recommendations WHERE category = ?) AS has_items");
 for (const category of builtinCategories) {
   const hasItems = Boolean((categoryHasItems.get(category.id) as { has_items: number }).has_items);
   addBuiltinCategory.run(category.id, category.label, Number(category.core), Number(category.core || hasItems), category.order);
 }
 
-const columns = db.prepare("PRAGMA table_info(recommendations)").all() as Array<{ name: string }>;
+const columns = ownerDb.prepare("PRAGMA table_info(recommendations)").all() as Array<{ name: string }>;
 if (!columns.some(column => column.name === "source_links")) {
-  db.exec("ALTER TABLE recommendations ADD COLUMN source_links TEXT NOT NULL DEFAULT '[]'");
+  ownerDb.exec("ALTER TABLE recommendations ADD COLUMN source_links TEXT NOT NULL DEFAULT '[]'");
 }
-if (!columns.some(column => column.name === "author")) db.exec("ALTER TABLE recommendations ADD COLUMN author TEXT");
-if (!columns.some(column => column.name === "book_series")) db.exec("ALTER TABLE recommendations ADD COLUMN book_series TEXT");
+if (!columns.some(column => column.name === "author")) ownerDb.exec("ALTER TABLE recommendations ADD COLUMN author TEXT");
+if (!columns.some(column => column.name === "book_series")) ownerDb.exec("ALTER TABLE recommendations ADD COLUMN book_series TEXT");
+
+
+const requestUserContext = new AsyncLocalStorage<string>();
+const tenantDatabases = new Map<string, Database.Database>([[ownerTelegramId, ownerDb]]);
+
+function initializeTenantDatabase(target: Database.Database) {
+  target.pragma("journal_mode = WAL");
+  target.exec([
+    "CREATE TABLE IF NOT EXISTS recommendations (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, category TEXT NOT NULL, year INTEGER, note TEXT, author TEXT, book_series TEXT, source_url TEXT, source_text TEXT, source_links TEXT NOT NULL DEFAULT '[]', added_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, watched INTEGER NOT NULL DEFAULT 0)",
+    "CREATE INDEX IF NOT EXISTS idx_recommendations_category ON recommendations(category)",
+    "CREATE TABLE IF NOT EXISTS recommendation_categories (id TEXT PRIMARY KEY, label TEXT NOT NULL COLLATE NOCASE UNIQUE, is_core INTEGER NOT NULL DEFAULT 0, is_active INTEGER NOT NULL DEFAULT 1, sort_order INTEGER NOT NULL DEFAULT 0)",
+    "CREATE TABLE IF NOT EXISTS data_imports (id TEXT PRIMARY KEY, imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+  ].join("\n"));
+  const add = target.prepare("INSERT OR IGNORE INTO recommendation_categories (id, label, is_core, is_active, sort_order) VALUES (?, ?, ?, ?, ?)");
+  for (const category of builtinCategories) {
+    add.run(category.id, category.label, Number(category.core), Number(category.core), category.order);
+  }
+}
+
+function databaseForCurrentUser(): Database.Database {
+  const userId = requestUserContext.getStore();
+  if (!userId) throw new Error("Database access requires an authenticated Telegram user.");
+  const cached = tenantDatabases.get(userId);
+  if (cached) return cached;
+  if (!/^[0-9]+$/.test(userId)) throw new Error("Invalid Telegram user identifier.");
+  const userDirectory = resolve("data/users");
+  mkdirSync(userDirectory, { recursive: true });
+  const userDatabase = new Database(resolve(userDirectory, userId + ".sqlite"));
+  initializeTenantDatabase(userDatabase);
+  tenantDatabases.set(userId, userDatabase);
+  return userDatabase;
+}
+
+export function runForTelegramUser<T>(userId: number | string, callback: () => T): T {
+  return requestUserContext.run(String(userId), callback);
+}
+
+export function initializeCurrentUserLibrary(): void { databaseForCurrentUser(); }
+
+db = new Proxy(ownerDb, {
+  get(_target, property) {
+    if (property === "prepare") return (sql: string) => new Proxy({}, {
+      get(_statement, method) {
+        const statement = databaseForCurrentUser().prepare(sql);
+        const value = (statement as any)[method];
+        return typeof value === "function" ? value.bind(statement) : value;
+      }
+    });
+    if (property === "transaction") return (callback: (...args: any[]) => any) => (...args: any[]) =>
+      databaseForCurrentUser().transaction(callback)(...args);
+    const currentDb = databaseForCurrentUser();
+    const value = (currentDb as any)[property];
+    return typeof value === "function" ? value.bind(currentDb) : value;
+  }
+});
+
+ownerDb.exec("CREATE TABLE IF NOT EXISTS bot_users (telegram_id TEXT PRIMARY KEY, username TEXT, role TEXT NOT NULL DEFAULT 'member', is_active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
+ownerDb.exec("CREATE TABLE IF NOT EXISTS bot_invitations (username TEXT PRIMARY KEY, invited_by TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
+ownerDb.prepare("INSERT INTO bot_users (telegram_id, role, is_active) VALUES (?, 'owner', 1) ON CONFLICT(telegram_id) DO UPDATE SET role = 'owner', is_active = 1").run(ownerTelegramId);
+
+function normalizeUsername(username: string): string | null {
+  const normalized = username.trim().replace(/^@/, "").toLocaleLowerCase();
+  return /^[a-z0-9_]{5,32}$/.test(normalized) ? normalized : null;
+}
+
+export function isAuthorizedTelegramUser(telegramId: number | string): boolean {
+  return Boolean(ownerDb.prepare("SELECT 1 FROM bot_users WHERE telegram_id = ? AND is_active = 1").get(String(telegramId)));
+}
+
+export function updateTelegramUsername(telegramId: number | string, username?: string): void {
+  if (!username) return;
+  const normalized = normalizeUsername(username);
+  if (normalized) ownerDb.prepare("UPDATE bot_users SET username = ? WHERE telegram_id = ? AND is_active = 1").run(normalized, String(telegramId));
+}
+
+export function createTelegramInvitation(username: string, invitedBy: number | string): "created" | "invalid" | "already_exists" | "full" {
+  const normalized = normalizeUsername(username);
+  if (!normalized) return "invalid";
+  return ownerDb.transaction(() => {
+    if (ownerDb.prepare("SELECT 1 FROM bot_users WHERE lower(username) = ? AND is_active = 1").get(normalized) ||
+        ownerDb.prepare("SELECT 1 FROM bot_invitations WHERE username = ?").get(normalized)) return "already_exists";
+    const counts = ownerDb.prepare("SELECT (SELECT COUNT(*) FROM bot_users WHERE is_active = 1) + (SELECT COUNT(*) FROM bot_invitations) AS total").get() as { total: number };
+    if (counts.total >= 10) return "full";
+    ownerDb.prepare("INSERT INTO bot_invitations (username, invited_by) VALUES (?, ?)").run(normalized, String(invitedBy));
+    return "created";
+  })();
+}
+
+export function acceptTelegramInvitation(telegramId: number | string, username?: string): boolean {
+  const id = String(telegramId);
+  if (isAuthorizedTelegramUser(id)) return true;
+  const normalized = username ? normalizeUsername(username) : null;
+  if (!normalized) return false;
+  return ownerDb.transaction(() => {
+    if (!ownerDb.prepare("SELECT 1 FROM bot_invitations WHERE username = ?").get(normalized)) return false;
+    const existing = ownerDb.prepare("SELECT telegram_id FROM bot_users WHERE lower(username) = ? AND is_active = 1").get(normalized) as { telegram_id: string } | undefined;
+    if (existing && existing.telegram_id !== id) return false;
+    ownerDb.prepare("INSERT INTO bot_users (telegram_id, username, role, is_active) VALUES (?, ?, 'member', 1) ON CONFLICT(telegram_id) DO UPDATE SET username = excluded.username, role = 'member', is_active = 1").run(id, normalized);
+    ownerDb.prepare("DELETE FROM bot_invitations WHERE username = ?").run(normalized);
+    return true;
+  })();
+}
+
+export function revokeTelegramAccess(username: string): "revoked" | "invite_removed" | "owner" | "not_found" | "invalid" {
+  const normalized = normalizeUsername(username);
+  if (!normalized) return "invalid";
+  return ownerDb.transaction(() => {
+    const user = ownerDb.prepare("SELECT telegram_id, role FROM bot_users WHERE lower(username) = ? AND is_active = 1").get(normalized) as { telegram_id: string; role: string } | undefined;
+    if (user?.role === "owner") return "owner";
+    if (user) {
+      ownerDb.prepare("UPDATE bot_users SET is_active = 0 WHERE telegram_id = ?").run(user.telegram_id);
+      return "revoked";
+    }
+    if (ownerDb.prepare("DELETE FROM bot_invitations WHERE username = ?").run(normalized).changes) return "invite_removed";
+    return "not_found";
+  })();
+}
+
+export function listTelegramAccess(): Array<{ username: string | null; telegram_id: string; role: string; status: string }> {
+  const users = ownerDb.prepare("SELECT username, telegram_id, role FROM bot_users WHERE is_active = 1 ORDER BY role DESC, created_at ASC").all() as Array<{ username: string | null; telegram_id: string; role: string }>;
+  const invites = ownerDb.prepare("SELECT username FROM bot_invitations ORDER BY created_at ASC").all() as Array<{ username: string }>;
+  return [
+    ...users.map(user => ({ ...user, status: user.role === "owner" ? "владелец" : "активен" })),
+    ...invites.map(invite => ({ username: invite.username, telegram_id: "", role: "pending", status: "ожидает /start" }))
+  ];
+}
 
 const insertStmt = db.prepare(`
   INSERT INTO recommendations (title, category, year, note, author, book_series, source_url, source_text, source_links)

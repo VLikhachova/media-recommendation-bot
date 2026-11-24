@@ -4,9 +4,9 @@ import { Telegraf, Markup } from "telegraf";
 import { extractRecommendations, extractRecommendationsFromImages } from "./extractor.js";
 import { extractUrl, extractUrls, getLinkPreview } from "./link-preview.js";
 import {
-  createCategory, deleteRecommendation, getByCategory, getByListNumber, getCategories,
+  acceptTelegramInvitation, createCategory, createTelegramInvitation, deleteRecommendation, getByCategory, getByListNumber, getCategories,
   getById, getCategory, getCategoryByLabel, getRandom, markWatched, moveToWatched, renameCategory,
-  importLocalBackup, saveRecommendations, searchMedia, searchRecommendations, setCategoryActive, updateCategory, updateRecommendationTitle
+  importLocalBackup, initializeCurrentUserLibrary, isAuthorizedTelegramUser, listTelegramAccess, revokeTelegramAccess, runForTelegramUser, saveRecommendations, searchMedia, searchRecommendations, setCategoryActive, updateCategory, updateRecommendationTitle, updateTelegramUsername
 } from "./database.js";
 import type { Category, Recommendation } from "./types.js";
 import { getTmdbDetails } from "./tmdb.js";
@@ -20,18 +20,38 @@ if (!process.env.TELEGRAM_USER_ID) throw new Error("Не задан TELEGRAM_USE
 const allowedUserId = Number(process.env.TELEGRAM_USER_ID);
 if (!Number.isSafeInteger(allowedUserId)) throw new Error("TELEGRAM_USER_ID должен быть числом");
 
-let pendingCategoryInput: { action: "add" } | { action: "rename"; categoryId: Category } | null = null;
+const pendingCategoryInputs = new Map<number, { action: "add" } | { action: "rename"; categoryId: Category }>();
 const pendingNaturalRenames = new Map<string, { id: number; title: string }>();
 let naturalRenameSequence = 0;
 const bot = new Telegraf(token);
 const replaceableRecommendationMessages = new Map<number, number>();
 bot.use(async (ctx, next) => {
-  if (ctx.from?.id !== allowedUserId) return;
-  if (pendingCategoryInput && ctx.message && "text" in ctx.message) {
-    await completeCategoryInput(ctx, ctx.message.text);
+  if (!ctx.from) return;
+  if (ctx.chat?.type !== "private") {
+    if (ctx.message) await ctx.reply("Чтобы записи оставались личными, используй бота в личном чате.");
     return;
   }
-  return next();
+  const telegramUserId = String(ctx.from.id);
+  return runForTelegramUser(telegramUserId, async () => {
+    const isOwner = ctx.from!.id === allowedUserId;
+    if (!isOwner && !isAuthorizedTelegramUser(telegramUserId)) {
+      const text = ctx.message && "text" in ctx.message ? ctx.message.text : "";
+      if (/^\/start(?:@\w+)?(?:\s|$)/i.test(text) && acceptTelegramInvitation(telegramUserId, ctx.from?.username)) {
+        initializeCurrentUserLibrary();
+        await ctx.reply("Приглашение принято. Твоя личная библиотека готова.", mainReplyKeyboard());
+        return;
+      }
+      if (ctx.message) await ctx.reply("Бот доступен по приглашению. Попроси владельца добавить твой Telegram username.");
+      return;
+    }
+    updateTelegramUsername(telegramUserId, ctx.from?.username);
+    const pending = pendingCategoryInputs.get(ctx.from!.id);
+    if (pending && ctx.message && "text" in ctx.message) {
+      await completeCategoryInput(ctx, ctx.message.text, ctx.from!.id);
+      return;
+    }
+    return next();
+  });
 });
 const categoryAliases: Record<string, Category> = {
   movie: "movie", film: "movie", фильм: "movie", фильма: "movie", фильмы: "movie", фильмов: "movie",
@@ -251,9 +271,9 @@ async function showCategoriesManager(ctx: any) {
   await ctx.reply("Настрой категории. Скрытые списки и их записи можно вернуть в меню.", categoriesManagerKeyboard());
 }
 
-async function completeCategoryInput(ctx: any, value: string) {
-  const pending = pendingCategoryInput;
-  pendingCategoryInput = null;
+async function completeCategoryInput(ctx: any, value: string, telegramUserId: number) {
+  const pending = pendingCategoryInputs.get(telegramUserId);
+  pendingCategoryInputs.delete(telegramUserId);
   const label = value.trim().replace(/\s+/g, " ");
   if (label === "/cancel") return ctx.reply("Отменила действие.");
   if (!label || label.length > 40) {
@@ -512,7 +532,7 @@ async function performNaturalListAction(ctx: any, action: NaturalListAction) {
       if (action.kind === "move") callback = `natmove:${item.id}:${action.target}`;
       else if (action.kind === "delete") callback = `natdelete:${item.id}`;
       else {
-        const key = `${Date.now().toString(36)}${(++naturalRenameSequence).toString(36)}`;
+        const key = String(ctx.from.id) + ":" + Date.now().toString(36) + (++naturalRenameSequence).toString(36);
         pendingNaturalRenames.set(key, { id: item.id, title: action.newTitle });
         callback = `natrename:${key}`;
       }
@@ -589,6 +609,41 @@ async function processText(ctx: any, text: string, sourceUrl: string | null, ext
   );
 }
 
+bot.command("invite", async (ctx) => {
+  if (ctx.from.id !== allowedUserId) return ctx.reply("Управлять приглашениями может только владелец бота.");
+  const username = ctx.message.text.replace(/^\/invite(?:@\w+)?\s*/i, "").trim();
+  if (!username) return ctx.reply("Формат: /invite @username");
+  const result = createTelegramInvitation(username, ctx.from.id);
+  const messages = {
+    created: "Приглашение создано для " + username + ". Пусть человек откроет бота и отправит /start.",
+    invalid: "Не удалось распознать username. Укажи его в формате @username.",
+    already_exists: "Этот username уже приглашён или имеет доступ.",
+    full: "Достигнут лимит: максимум 10 пользователей, включая тебя. Сначала отзови чей-то доступ."
+  };
+  await ctx.reply(messages[result]);
+});
+
+bot.command("revoke", async (ctx) => {
+  if (ctx.from.id !== allowedUserId) return ctx.reply("Управлять приглашениями может только владелец бота.");
+  const username = ctx.message.text.replace(/^\/revoke(?:@\w+)?\s*/i, "").trim();
+  if (!username) return ctx.reply("Формат: /revoke @username");
+  const result = revokeTelegramAccess(username);
+  const messages = {
+    revoked: "Доступ для " + username + " отозван. Его библиотека сохранена отдельно и недоступна другим.",
+    invite_removed: "Приглашение для " + username + " отменено.",
+    owner: "Нельзя отозвать доступ владельца.",
+    not_found: "Активный пользователь или приглашение не найдены.",
+    invalid: "Укажи username в формате @username."
+  };
+  await ctx.reply(messages[result]);
+});
+
+bot.command("users", async (ctx) => {
+  if (ctx.from.id !== allowedUserId) return ctx.reply("Список пользователей доступен только владельцу бота.");
+  const users = listTelegramAccess();
+  await ctx.reply("Доступ к боту (" + users.length + "/10 мест занято (пользователи и приглашения):\n" +
+    users.map(user => (user.username ? "@" + user.username : user.telegram_id) + " — " + user.status).join("\n"));
+});
 bot.start((ctx) => ctx.reply(
   "Это твоя библиотека рекомендаций.\n\n" +
   "Отправляй ссылку на пост, текст публикации или название фильма/сериала/книги/игры.\n\n" +
@@ -728,7 +783,7 @@ bot.action("manage_categories", async (ctx) => {
 
 bot.action("category_add", async (ctx) => {
   await ctx.answerCbQuery();
-  pendingCategoryInput = { action: "add" };
+  pendingCategoryInputs.set(ctx.from.id, { action: "add" });
   await ctx.reply("Напиши название нового списка (до 40 символов). Для отмены отправь /cancel.");
 });
 
@@ -737,7 +792,7 @@ bot.action(/^category_rename:(.+)$/, async (ctx) => {
   const category = getCategory(categoryId);
   await ctx.answerCbQuery();
   if (!category) return ctx.reply("Категория не найдена.");
-  pendingCategoryInput = { action: "rename", categoryId };
+  pendingCategoryInputs.set(ctx.from.id, { action: "rename", categoryId });
   await ctx.reply(`Напиши новое название для списка «${category.label}» (до 40 символов). Для отмены отправь /cancel.`);
 });
 
@@ -807,8 +862,9 @@ bot.action(/^natdelete:(\d+)$/, async (ctx) => {
 });
 
 bot.action(/^natrename:(.+)$/, async (ctx) => {
-  const pending = pendingNaturalRenames.get(ctx.match[1]);
-  pendingNaturalRenames.delete(ctx.match[1]);
+  const key = String(ctx.from.id) + ":" + ctx.match[1].split(":").slice(1).join(":");
+  const pending = pendingNaturalRenames.get(key);
+  pendingNaturalRenames.delete(key);
   await ctx.answerCbQuery();
   if (!pending) return ctx.editMessageText("Запрос на переименование устарел. Отправь его ещё раз.");
   const item = getById(pending.id);
