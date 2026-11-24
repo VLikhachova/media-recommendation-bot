@@ -312,26 +312,37 @@ async function completeCategoryInput(ctx: any, value: string, telegramUserId: nu
   }
 }
 
-async function sendCategoryList(ctx: any, category: Category) {
-  const rows = getByCategory(category, 50);
+async function sendCategoryList(ctx: any, category: Category, requestedPage = 0, editMessage = false) {
+  const rows = getByCategory(category, 10000);
   const label = categoryLabel(category);
-  if (!rows.length) return ctx.reply(`${label} (0)\n\nПока здесь ничего нет.`);
+  if (!rows.length) {
+    const text = `${label} (0)\n\nПока здесь ничего нет.`;
+    return editMessage ? ctx.editMessageText(text) : ctx.reply(text);
+  }
   const hasCards = ["movie", "series", "watched"].includes(category) || (category === "book" && hasGoogleBooksApiKey());
+  const pageSize = hasCards ? 20 : 10;
+  const pageCount = Math.ceil(rows.length / pageSize);
+  const pageNumber = Math.max(0, Math.min(requestedPage, pageCount - 1));
+  const page = rows.slice(pageNumber * pageSize, (pageNumber + 1) * pageSize);
+  const heading = `${label} (${rows.length}) · ${pageNumber + 1}/${pageCount}`;
+  const navigation: any[] = [];
+  if (pageNumber > 0) navigation.push(Markup.button.callback("← Назад", `list_page:${category}:${pageNumber - 1}`));
+  if (pageNumber + 1 < pageCount) navigation.push(Markup.button.callback("Далее →", `list_page:${category}:${pageNumber + 1}`));
   if (!hasCards) {
-    return ctx.reply(`${label} (${rows.length})\n\n${formatItems(rows)}`);
+    const text = `${heading}\n\n${formatItems(page)}`;
+    const keyboard = navigation.length ? Markup.inlineKeyboard([navigation]) : undefined;
+    return editMessage ? ctx.editMessageText(text, keyboard || {}) : ctx.reply(text, keyboard || {});
   }
-  for (let start = 0; start < rows.length; start += 20) {
-    const page = rows.slice(start, start + 20);
-    const heading = start === 0 ? `${label} (${rows.length})` : `${label} · продолжение`;
-    const buttons: ReturnType<typeof Markup.button.callback>[][] = [];
-    for (let index = 0; index < page.length; index += 2) {
-      buttons.push(page.slice(index, index + 2).map(item => Markup.button.callback(
-        `${item.list_number}. ${item.title}`.slice(0, 60),
-        `item_card:${item.id}`
-      )));
-    }
-    await ctx.reply(heading, Markup.inlineKeyboard(buttons));
+  const buttons: any[][] = [];
+  for (let index = 0; index < page.length; index += 2) {
+    buttons.push(page.slice(index, index + 2).map(item => Markup.button.callback(
+      `${item.list_number}. ${item.title}`.slice(0, 60),
+      `item_card:${item.id}`
+    )));
   }
+  if (navigation.length) buttons.push(navigation);
+  const keyboard = Markup.inlineKeyboard(buttons);
+  return editMessage ? ctx.editMessageText(heading, keyboard) : ctx.reply(heading, keyboard);
 }
 
 async function showListsMenu(ctx: any) {
@@ -821,6 +832,14 @@ bot.action(/^category_(hide|show):(.+)$/, async (ctx) => {
   if (!setCategoryActive(categoryId, active)) return ctx.reply("Основные категории скрыть нельзя.");
   await ctx.reply(active ? `Список «${category.label}» снова показывается.` : `Список «${category.label}» скрыт. Записи сохранены.`);
   await showCategoriesManager(ctx);
+});
+
+bot.action(/^list_page:([^:]+):(\d+)$/, async (ctx) => {
+  const category = getCategory(ctx.match[1]);
+  const page = Number(ctx.match[2]);
+  await ctx.answerCbQuery();
+  if (!category || !category.isActive) return ctx.reply("Этот список скрыт. Вернуть его можно в /categories.");
+  await sendCategoryList(ctx, category.id, page, true);
 });
 
 bot.action(/^open_list:(.+)$/, async (ctx) => {
