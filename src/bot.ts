@@ -168,6 +168,19 @@ async function sendRecommendationCard(ctx: any, item: any) {
   return replaceRecommendationMessage(ctx, () => sendRecommendationCardMessage(ctx, item));
 }
 
+function recommendationCardKeyboard(item: any) {
+  const rows: any[][] = [];
+  if (["movie", "series"].includes(item.category)) {
+    rows.push([Markup.button.callback("Просмотрено", "watched:" + item.id)]);
+  }
+  rows.push([Markup.button.callback("Удалить", "delete_card:" + item.id)]);
+  for (const link of recordLinks(item)) {
+    let label = "Источник";
+    try { label = new URL(link).hostname.slice(0, 60); } catch { /* Keep generic label. */ }
+    rows.push([Markup.button.url(label, link)]);
+  }
+  return Markup.inlineKeyboard(rows);
+}
 async function sendRecommendationCardMessage(ctx: any, item: any) {
   let details: Awaited<ReturnType<typeof getTmdbDetails>> = null;
   let bookDetails: Awaited<ReturnType<typeof getGoogleBookDetails>> = null;
@@ -192,12 +205,7 @@ async function sendRecommendationCardMessage(ctx: any, item: any) {
         : "Описание пока недоступно."
   );
   const caption = `<b>${escapeHtml(title)}${year ? ` (${escapeHtml(String(year))})` : ""}</b>\n${escapeHtml(categoryLabel(item.category))}${bookInfo ? `\n${escapeHtml(bookInfo)}` : ""}\n\n${escapeHtml(overview.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").slice(0, 800))}`;
-  const linkButtons = recordLinks(item).map((link, index) => {
-    let label = `Источник ${index + 1}`;
-    try { label = new URL(link).hostname.slice(0, 60); } catch { /* Keep generic label. */ }
-    return [Markup.button.url(label, link)];
-  });
-  const keyboard = linkButtons.length ? Markup.inlineKeyboard(linkButtons) : undefined;
+  const keyboard = recommendationCardKeyboard(item);
   const posterUrl = details?.posterUrl || bookDetails?.coverUrl;
   if (posterUrl) {
     try {
@@ -337,13 +345,14 @@ async function showRandomCategories(ctx: any) {
 }
 
 function watchedTitleFromMessage(text: string): string | null {
-  const normalized = text.trim().replace(/[.!?]+$/, "");
+  const normalized = text.trim().replace(/[.!?]+$/, "").replace(/\*\*/g, "").trim();
+  const statusMatch = normalized.match(/^(.+?)\s*[-—–]\s*просмотрено$/i);
   const verbMatch = normalized.match(/^(?:(?:я|мы)\s+)?(?:посмотрел(?:а|и)?|глянул(?:а|и)?|досмотрел(?:а|и)?)\s+(.+)$/i);
-  if (verbMatch) return verbMatch[1].trim();
   const addMatch = normalized.match(/^(?:добавь|занеси)\s+(.+?)\s+в\s+просмотренное$/i);
-  if (addMatch) return addMatch[1].trim();
   const putMatch = normalized.match(/^(?:добавь|занеси)\s+в\s+просмотренное\s+(.+)$/i);
-  return putMatch?.[1]?.trim() || null;
+  const match = statusMatch?.[1] || verbMatch?.[1] || addMatch?.[1] || putMatch?.[1];
+  if (!match) return null;
+  return match.trim().replace(/\s+\((?:18|19|20)\d{2}\)$/, "").replace(/^[«"“]+|[»"”]+$/g, "").trim() || null;
 }
 
 function categoryFromListRequest(text: string): Category | null {
@@ -359,7 +368,7 @@ type NaturalListAction =
   | { kind: "move"; title: string; source: Category; target: Category }
   | { kind: "moveNumber"; number: number; source: Category; target: Category }
   | { kind: "rename"; title: string; newTitle: string }
-  | { kind: "delete"; title: string }
+  | { kind: "delete"; title: string; category?: Category }
   | { kind: "deleteNumbers"; category: Category; numbers: number[] }
   | { kind: "deleteTitles"; entries: Array<{ title: string; category: Category }> };
 
@@ -442,6 +451,11 @@ function parseNaturalListActions(text: string): NaturalListAction[] {
       }
       continue;
     }
+    const titleDelete = part.match(/^(?:удали|удалить)\s+(.+?)\s*[.!?]*$/i);
+    if (titleDelete) {
+      actions.push({ kind: "delete", title: titleDelete[1].trim(), category: currentCategory || undefined });
+      continue;
+    }
     const move = part.match(/^(.+?)\s*(?:[-—:]\s*)?(?:перенеси|перемести|перенести)\s+из\s+(.+?)\s+в\s+(.+?)\s*[.!?]*$/i);
     if (move) {
       const source = resolveCategory(move[2]);
@@ -518,11 +532,13 @@ async function performNaturalListAction(ctx: any, action: NaturalListAction) {
     await ctx.reply(`${result}${missing.length ? ` Не найдены: ${missing.join(", ")}.` : " Нумерация обновлена."}`);
     return;
   }
-  const matches = findTitleMatches(action.title, action.kind === "move" ? action.source : undefined);
+  const matches = findTitleMatches(action.title, action.kind === "move" ? action.source : action.kind === "delete" ? action.category : undefined);
   if (!matches.length) {
     await ctx.reply(action.kind === "move"
       ? `Не нашла «${action.title}» в списке «${categoryLabel(action.source)}».`
-      : `Не нашла «${action.title}» в списках.`);
+      : action.kind === "delete" && action.category
+        ? `Не нашла «${action.title}» в списке «${categoryLabel(action.category)}».`
+        : `Не нашла «${action.title}» в списках.`);
     return;
   }
   if (matches.length > 1) {
@@ -562,7 +578,7 @@ async function handleNaturalListActions(ctx: any, text: string): Promise<boolean
     return true;
   }
   if (/(?:перенеси|перемести|перенести|переименовать|удали|удалить)/i.test(text)) {
-    await ctx.reply("Не распознала команду. Примеры: «Историю электричества — переименовать в История электричества»; «Фильмы, удалить №4 и №5».");
+    await ctx.reply("Не распознала команду. Примеры: «Историю электричества — переименовать в История электричества»; «Фильмы, удалить №4 и №5»; «Фильмы, удалить Carrie».");
     return true;
   }
   return false;
@@ -838,8 +854,36 @@ bot.action(/^watched:(\d+)$/, async (ctx) => {
     return ctx.editMessageReplyMarkup(undefined);
   }
   moveToWatched(id);
+  const updatedItem = getById(id);
   await ctx.answerCbQuery("Перенесено в просмотренное");
-  await ctx.editMessageText(`«${item.title}» перенесён в список «Просмотренное».`);
+  const message = ctx.callbackQuery.message;
+  const originalText = message?.caption || message?.text || "";
+  const updatedText = originalText + "\n\nОтмечено как просмотренное."; 
+  const keyboard = recommendationCardKeyboard(updatedItem || { ...item, category: "watched" });
+  if (message?.photo?.length) {
+    await ctx.editMessageCaption(updatedText, { parse_mode: "HTML", ...keyboard });
+  } else {
+    await ctx.editMessageText(updatedText, { parse_mode: "HTML", ...keyboard });
+  }
+});
+
+bot.action(/^delete_card:(\d+)$/, async (ctx) => {
+  const id = Number(ctx.match[1]);
+  const item = getById(id);
+  if (!item) {
+    await ctx.answerCbQuery("Запись уже удалена.");
+    return ctx.editMessageReplyMarkup(undefined);
+  }
+  deleteRecommendation(id);
+  await ctx.answerCbQuery("Удалено из списка");
+  await ctx.editMessageReplyMarkup(undefined);
+  const message = ctx.callbackQuery.message;
+  const confirmation = "<b>" + escapeHtml(item.title) + "</b>\n\nУдалено из списка «" + escapeHtml(categoryLabel(item.category)) + "». Нумерация обновлена.";
+  if (message?.photo?.length) {
+    await ctx.editMessageCaption(confirmation, { parse_mode: "HTML" });
+  } else {
+    await ctx.editMessageText(confirmation, { parse_mode: "HTML" });
+  }
 });
 
 bot.action(/^natmove:(\d+):(.+)$/, async (ctx) => {
