@@ -177,8 +177,30 @@ function listsKeyboard() {
   const buttons = getCategories().map(category => Markup.button.callback(category.label, `open_list:${category.id}`));
   const rows = [];
   for (let i = 0; i < buttons.length; i += 2) rows.push(buttons.slice(i, i + 2));
-  rows.push([Markup.button.callback("⚙️ Категории", "manage_categories")]);
+  rows.push([Markup.button.callback("⚙️ Настроить категории", "manage_categories")]);
+  rows.push([Markup.button.callback("← Меню", "show_main_menu")]);
   return Markup.inlineKeyboard(rows);
+}
+
+function mainReplyKeyboard() {
+  return Markup.keyboard([
+    ["📂 Категории"],
+    ["🎲 Случайная рекомендация"]
+  ]).resize().persistent();
+}
+
+function randomCategoriesKeyboard() {
+  const buttons = getCategories()
+    .filter(category => category.id !== "watched")
+    .map(category => Markup.button.callback(category.label, `random_category:${category.id}`));
+  const rows = [];
+  for (let i = 0; i < buttons.length; i += 2) rows.push(buttons.slice(i, i + 2));
+  rows.push([Markup.button.callback("← Меню", "show_main_menu")]);
+  return Markup.inlineKeyboard(rows);
+}
+
+async function showMainMenu(ctx: any) {
+  await ctx.reply("Выбери действие в меню под полем ввода.", mainReplyKeyboard());
 }
 
 function categoriesManagerKeyboard() {
@@ -255,6 +277,12 @@ async function sendCategoryList(ctx: any, category: Category) {
 
 async function showListsMenu(ctx: any) {
   return ctx.reply("Выбери список:", listsKeyboard());
+}
+
+async function showRandomCategories(ctx: any) {
+  const available = getCategories().some(category => category.id !== "watched");
+  if (!available) return ctx.reply("Пока нет доступных категорий для случайной рекомендации.");
+  return ctx.reply("Из какого списка выбрать случайную рекомендацию?", randomCategoriesKeyboard());
 }
 
 function watchedTitleFromMessage(text: string): string | null {
@@ -533,8 +561,13 @@ async function processText(ctx: any, text: string, sourceUrl: string | null, ext
 bot.start((ctx) => ctx.reply(
   "Это твоя библиотека рекомендаций.\n\n" +
   "Отправляй ссылку на пост, текст публикации или название фильма/сериала/книги/игры.\n\n" +
-  "Команды:\n/list — открыть списки\n/categories — настроить категории\n/movies — фильмы\n/series — сериалы\n/books — книги\n/search слово — поиск\n/random — случайная непросмотренная рекомендация\n/done сериал 2 — перенести №2 в просмотренное\n/type фильм 2 сериал — перенести №2 из фильмов в сериалы\n/delete фильм 2 — удалить №2 из списка фильмов\n/credits — источник описаний\n/help — помощь\n\nНапиши «посмотрела Керри» — найду фильм или сериал и перенесу его в список «Просмотренное»."
+  "Команды:\n/list — открыть списки\n/categories — настроить категории\n/movies — фильмы\n/series — сериалы\n/books — книги\n/search слово — поиск\n/random — случайная непросмотренная рекомендация\n/done сериал 2 — перенести №2 в просмотренное\n/type фильм 2 сериал — перенести №2 из фильмов в сериалы\n/delete фильм 2 — удалить №2 из списка фильмов\n/credits — источник описаний\n/help — помощь\n\nНапиши «посмотрела Керри» — найду фильм или сериал и перенесу его в список «Просмотренное».",
+  mainReplyKeyboard()
 ));
+
+bot.command("menu", async (ctx) => showMainMenu(ctx));
+bot.hears("📂 Категории", async (ctx) => showListsMenu(ctx));
+bot.hears("🎲 Случайная рекомендация", async (ctx) => showRandomCategories(ctx));
 
 bot.help((ctx) => ctx.reply(
   "Как пользоваться:\n" +
@@ -589,6 +622,20 @@ bot.command("random", async (ctx) => {
   );
 });
 
+bot.action(/^random_category:(.+)$/, async (ctx) => {
+  const category = ctx.match[1];
+  await ctx.answerCbQuery();
+  if (!getCategories().some(item => item.id === category && item.id !== "watched")) {
+    return ctx.reply("Эта категория недоступна.");
+  }
+  const item = getRandom(category);
+  if (!item) return ctx.reply(`В списке «${categoryLabel(category)}» нет непросмотренных рекомендаций.`);
+  await ctx.reply(
+    `Случайная рекомендация из списка «${categoryLabel(category)}»:\n#${item.list_number} · ${formatRecommendationTitle(item)}`,
+    Markup.inlineKeyboard([[Markup.button.callback("Посмотрено", `done:${item.id}`)]])
+  );
+});
+
 bot.command("done", async (ctx) => {
   const args = ctx.message.text.replace(/^\/done(?:@\w+)?\s*/i, "").trim().split(/\s+/);
   const position = parseCategoryPosition(args);
@@ -633,6 +680,11 @@ bot.command("type", async (ctx) => {
 bot.action("show_lists", async (ctx) => {
   await ctx.answerCbQuery();
   await showListsMenu(ctx);
+});
+
+bot.action("show_main_menu", async (ctx) => {
+  await ctx.answerCbQuery();
+  await showMainMenu(ctx);
 });
 
 bot.action("manage_categories", async (ctx) => {

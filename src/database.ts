@@ -238,16 +238,17 @@ export function updateCategory(id: number, category: Category) {
   return db.prepare("UPDATE recommendations SET category = ? WHERE id = ?").run(category, id).changes > 0;
 }
 
-export function getRandom() {
+export function getRandom(category?: Category) {
   return db.prepare(`
     WITH numbered AS (
       SELECT *, ROW_NUMBER() OVER (
         PARTITION BY category ORDER BY added_at ASC, id ASC
       ) AS list_number
-      FROM recommendations
+      FROM recommendations WHERE watched = 0 AND category <> 'watched'
+        ${category ? "AND category = ?" : ""}
     )
-    SELECT * FROM numbered WHERE watched = 0 ORDER BY RANDOM() LIMIT 1
-  `).get() as any | undefined;
+    SELECT * FROM numbered ORDER BY RANDOM() LIMIT 1
+  `).get(...(category ? [category] : [])) as any | undefined;
 }
 
 export function deleteRecommendation(id: number) {
