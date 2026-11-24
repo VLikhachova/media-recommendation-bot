@@ -6,7 +6,7 @@ import { extractUrl, extractUrls, getLinkPreview } from "./link-preview.js";
 import {
   createCategory, deleteRecommendation, getByCategory, getByListNumber, getCategories,
   getById, getCategory, getCategoryByLabel, getRandom, markWatched, moveToWatched, renameCategory,
-  saveRecommendations, searchMedia, searchRecommendations, setCategoryActive, updateCategory, updateRecommendationTitle
+  importLocalBackup, saveRecommendations, searchMedia, searchRecommendations, setCategoryActive, updateCategory, updateRecommendationTitle
 } from "./database.js";
 import type { Category, Recommendation } from "./types.js";
 import { getTmdbDetails } from "./tmdb.js";
@@ -756,6 +756,27 @@ bot.on("photo", async (ctx) => {
   } catch (error) {
     console.error(error);
     await ctx.reply("Не удалось обработать изображение. Попробуй отправить его ещё раз или скопируй текст.");
+  }
+});
+
+bot.on("document", async (ctx) => {
+  const document = ctx.message.document;
+  if (document.file_name !== "recommendation-backup.json") return;
+  if (document.file_size && document.file_size > 1_000_000) {
+    await ctx.reply("Файл переноса слишком большой.");
+    return;
+  }
+  try {
+    const file = await ctx.telegram.getFile(document.file_id);
+    if (!file.file_path) throw new Error("Файл недоступен.");
+    const response = await fetch(`https://api.telegram.org/file/bot${token}/${file.file_path}`);
+    if (!response.ok) throw new Error("Не удалось скачать файл.");
+    const backup = await response.json();
+    const count = importLocalBackup(backup);
+    await ctx.reply(`Перенос завершён: добавлено записей — ${count}.`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Неизвестная ошибка.";
+    await ctx.reply(`Не удалось перенести базу: ${message}`);
   }
 });
 

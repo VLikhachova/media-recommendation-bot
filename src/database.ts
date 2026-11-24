@@ -36,6 +36,10 @@ db.exec(`
     is_active INTEGER NOT NULL DEFAULT 1,
     sort_order INTEGER NOT NULL DEFAULT 0
   );
+  CREATE TABLE IF NOT EXISTS data_imports (
+    id TEXT PRIMARY KEY,
+    imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
 `);
 
 const builtinCategories = [
@@ -263,4 +267,48 @@ export function updateRecommendationTitle(id: number, title: string) {
 
 export function getById(id: number) {
   return db.prepare("SELECT * FROM recommendations WHERE id = ?").get(id) as any | undefined;
+}
+
+export function importLocalBackup(value: unknown): number {
+  if (!value || typeof value !== "object") throw new Error("Некорректный файл переноса.");
+  const backup = value as { version?: unknown; categories?: unknown; recommendations?: unknown };
+  if (backup.version !== 1 || !Array.isArray(backup.categories) || !Array.isArray(backup.recommendations)) {
+    throw new Error("Формат файла переноса не поддерживается.");
+  }
+  if (backup.categories.length > 100 || backup.recommendations.length > 10000) throw new Error("В файле слишком много данных.");
+  const priorImport = db.prepare("SELECT 1 FROM data_imports LIMIT 1").get();
+  if (priorImport) throw new Error("Перенос данных уже выполнялся.");
+  if ((db.prepare("SELECT COUNT(*) AS count FROM recommendations").get() as { count: number }).count !== 0) {
+    throw new Error("Перенос разрешён только в пустую базу.");
+  }
+
+  const transaction = db.transaction(() => {
+    for (const raw of backup.categories as any[]) {
+      if (!raw || typeof raw.id !== "string" || typeof raw.label !== "string" || raw.label.length > 40) {
+        throw new Error("В файле есть некорректная категория.");
+      }
+      db.prepare(`INSERT INTO recommendation_categories (id, label, is_core, is_active, sort_order)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET label = excluded.label, is_core = excluded.is_core,
+          is_active = excluded.is_active, sort_order = excluded.sort_order`)
+        .run(raw.id, raw.label, Number(Boolean(raw.isCore)), Number(Boolean(raw.isActive)), Number(raw.sortOrder) || 0);
+    }
+    const categoryIds = new Set((backup.categories as any[]).map(category => category.id));
+    const insert = db.prepare(`INSERT INTO recommendations
+      (title, category, year, note, author, book_series, source_links, added_at, watched)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    for (const raw of backup.recommendations as any[]) {
+      if (!raw || typeof raw.title !== "string" || !raw.title.trim() || typeof raw.category !== "string" || !categoryIds.has(raw.category)) {
+        throw new Error("В файле есть некорректная рекомендация.");
+      }
+      const links = Array.isArray(raw.source_links) ? raw.source_links.filter((link: unknown) => typeof link === "string").slice(0, 20) : [];
+      insert.run(raw.title.trim(), raw.category, Number.isInteger(raw.year) ? raw.year : null,
+        typeof raw.note === "string" ? raw.note : null, typeof raw.author === "string" ? raw.author : null,
+        typeof raw.book_series === "string" ? raw.book_series : null, JSON.stringify(links),
+        typeof raw.added_at === "string" ? raw.added_at : new Date().toISOString(), Number(Boolean(raw.watched)));
+    }
+    db.prepare("INSERT INTO data_imports (id) VALUES (?)").run("local-backup-v1");
+  });
+  transaction();
+  return backup.recommendations.length;
 }
