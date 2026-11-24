@@ -861,6 +861,25 @@ bot.action(/^open_list:(.+)$/, async (ctx) => {
   await sendCategoryList(ctx, category.id);
 });
 
+bot.action(/^save_choice:([a-z0-9]+):(\\d+)$/i, async (ctx) => {
+  const key = ctx.match[1];
+  const index = Number(ctx.match[2]);
+  const pending = pendingRecommendationChoices.get(key);
+  await ctx.answerCbQuery();
+  if (!pending || !pending.items[index]) {
+    return ctx.editMessageText("Выбор устарел. Отправь название ещё раз.");
+  }
+  pendingRecommendationChoices.delete(key);
+  const item = pending.items[index];
+  const result = saveRecommendations([item], pending.sourceUrl, pending.sourceText);
+  const message = result.saved
+    ? "Сохранено: " + formatRecommendationTitle(item) + " — " + categoryLabel(item.category) + "."
+    : "Такая запись уже есть в списке «" + categoryLabel(item.category) + "»."; 
+  await ctx.editMessageText(message, Markup.inlineKeyboard([
+    [Markup.button.callback("Открыть списки", "show_lists")]
+  ]));
+});
+
 bot.action(/^item_card:(\d+)$/, async (ctx) => {
   const item = getById(Number(ctx.match[1]));
   await ctx.answerCbQuery(item ? "Открываю карточку…" : "Запись не найдена.");
