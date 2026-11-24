@@ -24,7 +24,7 @@ let pendingCategoryInput: { action: "add" } | { action: "rename"; categoryId: Ca
 const pendingNaturalRenames = new Map<string, { id: number; title: string }>();
 let naturalRenameSequence = 0;
 const bot = new Telegraf(token);
-const replaceableRecommendationMessages = new Map<number, { messageId: number; kind: "text" | "photo" }>();
+const replaceableRecommendationMessages = new Map<number, number>();
 bot.use(async (ctx, next) => {
   if (ctx.from?.id !== allowedUserId) return;
   if (pendingCategoryInput && ctx.message && "text" in ctx.message) {
@@ -181,51 +181,28 @@ async function sendRecommendationCardMessage(ctx: any, item: any) {
   const posterUrl = details?.posterUrl || bookDetails?.coverUrl;
   if (posterUrl) {
     try {
-      return await replaceRecommendationMessage(ctx, {
-        kind: "photo", text: caption, photo: posterUrl, extra: { parse_mode: "HTML", ...(keyboard || {}) }
-      });
+      await ctx.replyWithPhoto(posterUrl, { caption, parse_mode: "HTML", ...(keyboard || {}) });
+      return;
     } catch {
-      // Fall back to a text card if Telegram cannot fetch the poster.
+      // Fall back to a text card if Telegram cannot fetch the TMDB poster.
     }
   }
-  return replaceRecommendationMessage(ctx, {
-    kind: "text", text: caption, extra: { parse_mode: "HTML", ...(keyboard || {}) }
-  });
+  await ctx.reply(caption, { parse_mode: "HTML", ...(keyboard || {}) });
 }
 
-async function replaceRecommendationMessage(
-  ctx: any,
-  content: { kind: "text" | "photo"; text: string; photo?: string; extra?: any }
-) {
+async function replaceRecommendationMessage(ctx: any, send: () => Promise<any>) {
   const chatId = ctx.chat?.id;
-  const previous = chatId ? replaceableRecommendationMessages.get(chatId) : undefined;
-  const extra = content.extra || {};
-  if (chatId && previous && previous.kind === content.kind) {
-    try {
-      if (content.kind === "photo" && content.photo) {
-        await ctx.telegram.editMessageMedia(chatId, previous.messageId, undefined, {
-          type: "photo", media: content.photo, caption: content.text, parse_mode: "HTML"
-        }, "reply_markup" in extra ? { reply_markup: extra.reply_markup } : {});
-      } else {
-        await ctx.telegram.editMessageText(chatId, previous.messageId, undefined, content.text, extra);
-      }
-      return;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (message.includes("message is not modified")) return;
-    }
-  }
-  const sent = content.kind === "photo" && content.photo
-    ? await ctx.replyWithPhoto(content.photo, { caption: content.text, parse_mode: "HTML", ...extra })
-    : await ctx.reply(content.text, extra);
-  if (!chatId || !sent?.message_id) return sent;
-  replaceableRecommendationMessages.set(chatId, { messageId: sent.message_id, kind: content.kind });
-  if (previous && previous.messageId !== sent.message_id) {
-    try { await ctx.telegram.deleteMessage(chatId, previous.messageId); }
+  const previousMessageId = chatId ? replaceableRecommendationMessages.get(chatId) : undefined;
+  const sentMessage = await send();
+  if (!chatId || !sentMessage?.message_id) return sentMessage;
+  replaceableRecommendationMessages.set(chatId, sentMessage.message_id);
+  if (previousMessageId && previousMessageId !== sentMessage.message_id) {
+    try { await ctx.telegram.deleteMessage(chatId, previousMessageId); }
     catch { /* The previous recommendation may already have been removed. */ }
   }
-  return sent;
+  return sentMessage;
 }
+
 
 function listsKeyboard() {
   const buttons = getCategories().map(category => Markup.button.callback(category.label, `open_list:${category.id}`));
@@ -684,14 +661,13 @@ bot.action(/^random_category:(.+)$/, async (ctx) => {
   }
   const item = getRandom(category);
   if (!item) return ctx.reply(`В списке «${categoryLabel(category)}» нет непросмотренных рекомендаций.`);
-  await replaceRecommendationMessage(ctx, {
-    kind: "text",
-    text: "Случайная рекомендация из списка «" + categoryLabel(category) + "»:\\n#" + item.list_number + " · " + formatRecommendationTitle(item),
-    extra: Markup.inlineKeyboard([[
-      Markup.button.callback("Посмотрено", "done:" + item.id),
-      Markup.button.callback("Описание", "item_card:" + item.id)
+  await replaceRecommendationMessage(ctx, () => ctx.reply(
+    `Случайная рекомендация из списка «${categoryLabel(category)}»:\n#${item.list_number} · ${formatRecommendationTitle(item)}`,
+    Markup.inlineKeyboard([[
+      Markup.button.callback("Посмотрено", `done:${item.id}`),
+      Markup.button.callback("Описание", `item_card:${item.id}`)
     ]])
-  });
+  ));
 });
 
 bot.command("done", async (ctx) => {
