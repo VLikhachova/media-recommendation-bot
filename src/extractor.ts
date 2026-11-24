@@ -30,7 +30,7 @@ function parseRecommendations(raw: string, availableLinks: string[], categories:
   if (!Array.isArray(parsed.items)) return [];
   const allowed = new Set(categories.map(category => category.id));
   const fallback = allowed.has("other") ? "other" : categories[0]?.id || "other";
-  return parsed.items.flatMap((item: any) => {
+  const recommendations = parsed.items.flatMap((item: any) => {
     if (!item || typeof item.title !== "string" || !item.title.trim()) return [];
     const category: Category = typeof item.category === "string" && allowed.has(item.category) ? item.category : fallback;
     const links: string[] = [];
@@ -49,6 +49,27 @@ function parseRecommendations(raw: string, availableLinks: string[], categories:
       links
     }];
   });
+
+  const unique: Recommendation[] = [];
+  const byIdentity = new Map<string, number>();
+  for (const item of recommendations) {
+    const normalizedTitle = item.title.toLocaleLowerCase("ru").normalize("NFKC")
+      .replace(/[^\p{L}\p{N}]+/gu, " ").trim().replace(/\s+/g, " ");
+    const key = item.category + ":" + normalizedTitle;
+    const existingIndex = byIdentity.get(key);
+    if (existingIndex === undefined) {
+      byIdentity.set(key, unique.length);
+      unique.push(item);
+      continue;
+    }
+    const existing = unique[existingIndex];
+    existing.year = existing.year || item.year;
+    existing.note = existing.note || item.note;
+    existing.author = existing.author || item.author;
+    existing.series = existing.series || item.series;
+    existing.links = [...new Set([...(existing.links || []), ...(item.links || [])])];
+  }
+  return unique;
 }
 
 export async function extractRecommendations(
