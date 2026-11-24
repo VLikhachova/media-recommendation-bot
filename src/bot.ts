@@ -22,6 +22,8 @@ if (!Number.isSafeInteger(allowedUserId)) throw new Error("TELEGRAM_USER_ID до
 
 const pendingCategoryInputs = new Map<number, { action: "add" } | { action: "rename"; categoryId: Category }>();
 const pendingNaturalRenames = new Map<string, { id: number; title: string }>();
+const pendingRecommendationChoices = new Map<string, { items: Recommendation[]; sourceUrl: string | null; sourceText: string }>();
+let recommendationChoiceSequence = 0;
 let naturalRenameSequence = 0;
 const bot = new Telegraf(token);
 const replaceableRecommendationMessages = new Map<number, number>();
@@ -631,6 +633,21 @@ async function processText(ctx: any, text: string, sourceUrl: string | null, ext
   const sourceLinks = collectSourceLinks(text, sourceUrl, extraLinks);
   const extracted = await enrichMediaRecommendations(await enrichBookRecommendations(await extractRecommendations(text, sourceLinks, recommendationCategories())));
   const items = attachUnambiguousSourceLink(extracted, sourceLinks);
+  const singleTitleInput = sourceUrl === null && !sourceLinks.length &&
+    !/[;,\\n]/.test(text) && text.trim().length <= 100 &&
+    !/^(?:посмотрела|посмотрел|покажи|удали|удалить|переименовать)\\b/i.test(text.trim());
+  if (singleTitleInput && items.length > 1) {
+    const key = Date.now().toString(36) + (++recommendationChoiceSequence).toString(36);
+    pendingRecommendationChoices.set(key, { items, sourceUrl, sourceText: text });
+    const buttons = items.slice(0, 10).map((item, index) => [
+      Markup.button.callback(
+        (categoryLabel(item.category) + " · " + formatRecommendationTitle(item)).slice(0, 60),
+        "save_choice:" + key + ":" + index
+      )
+    ]);
+    await ctx.reply("Нашла несколько вариантов. Что именно сохранить?", Markup.inlineKeyboard(buttons));
+    return;
+  }
   if (!items.length) {
     await ctx.reply(
       "Не нашёл явных названий. Пришли текст подписи к посту или просто напиши названия вручную.\n\n" +
@@ -861,7 +878,7 @@ bot.action(/^open_list:(.+)$/, async (ctx) => {
   await sendCategoryList(ctx, category.id);
 });
 
-bot.action(/^save_choice:([a-z0-9]+):(\\d+)$/i, async (ctx) => {
+bot.action(/^save_choice:([a-z0-9]+):(\d+)$/i, async (ctx) => {
   const key = ctx.match[1];
   const index = Number(ctx.match[2]);
   const pending = pendingRecommendationChoices.get(key);
