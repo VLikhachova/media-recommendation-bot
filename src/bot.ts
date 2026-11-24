@@ -634,8 +634,8 @@ async function processText(ctx: any, text: string, sourceUrl: string | null, ext
   const extracted = await enrichMediaRecommendations(await enrichBookRecommendations(await extractRecommendations(text, sourceLinks, recommendationCategories())));
   const items = attachUnambiguousSourceLink(extracted, sourceLinks);
   const singleTitleInput = sourceUrl === null && !sourceLinks.length &&
-    !/[;,\\n]/.test(text) && text.trim().length <= 100 &&
-    !/^(?:посмотрела|посмотрел|покажи|удали|удалить|переименовать)\\b/i.test(text.trim());
+    !/[;,\n]/.test(text) && text.trim().length <= 100 &&
+    !/^(?:посмотрела|посмотрел|покажи|удали|удалить|переименовать)\b/i.test(text.trim());
   if (singleTitleInput && items.length > 1) {
     const key = Date.now().toString(36) + (++recommendationChoiceSequence).toString(36);
     pendingRecommendationChoices.set(key, { items, sourceUrl, sourceText: text });
